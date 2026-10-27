@@ -1,0 +1,24 @@
+{
+  "name": "recoverops",
+  "version": "1.0.0",
+  "description": "RecoverOps — Serverless Incident Management System",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "dev:api": "npm --prefix backend run dev:mock",
+    "build": "npm --prefix frontend run build",
+    "test": "npm --prefix backend test",
+    "test:watch": "npm --prefix backend run test:watch"
+  },
+  "keywords": [
+    "serverless",
+    "incident-management",
+    "aws-lambda",
+    "dynamodb",
+    "react",
+    "vite",
+    "tailwind"
+  ],
+  "author": "RecoverOps Team",
+  "license": "MIT"
+}

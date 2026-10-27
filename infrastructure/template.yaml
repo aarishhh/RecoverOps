@@ -1,0 +1,322 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  RecoverOps - Serverless Incident Management System
+  Production AWS SAM template provisioning DynamoDB, Lambda, API Gateway, CloudWatch Logs, S3, and CloudFront with least-privilege IAM.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment target environment
+
+Globals:
+  Function:
+    Timeout: 15
+    MemorySize: 256
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64
+    Tracing: Active
+    Environment:
+      Variables:
+        NODE_OPTIONS: "--enable-source-maps"
+
+Resources:
+  ##############################################################################
+  # 1. DynamoDB Database (Pay-Per-Request Serverless On-Demand Capacity)
+  ##############################################################################
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "RecoverOps-Incidents-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: StatusCreatedAtIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Application
+          Value: RecoverOps
+        - Key: Environment
+          Value: !Ref Environment
+
+  ##############################################################################
+  # 2. Least-Privilege IAM Execution Role for Lambda
+  ##############################################################################
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "RecoverOps-Lambda-Role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        # CloudWatch Logging Permissions
+        - PolicyName: CloudWatchLogsLeastPrivilege
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/RecoverOps-*"
+        # DynamoDB Least-Privilege Permissions
+        - PolicyName: DynamoDBLeastPrivilegeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt IncidentsTable.Arn
+                  - !Sub "${IncidentsTable.Arn}/index/*"
+
+  ##############################################################################
+  # 3. Amazon CloudWatch Log Group for Lambda
+  ##############################################################################
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/RecoverOps-IncidentsApi-${Environment}"
+      RetentionInDays: 30
+
+  ##############################################################################
+  # 4. Amazon API Gateway HTTP API with CORS
+  ##############################################################################
+  IncidentsHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: !Sub "RecoverOps-Api-${Environment}"
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Api-Key
+          - X-Amz-Date
+          - X-Amz-Security-Token
+          - Accept
+        MaxAge: 3600
+
+  ##############################################################################
+  # 5. AWS Lambda Function
+  ##############################################################################
+  IncidentsApiFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - LambdaLogGroup
+      - LambdaExecutionRole
+    Properties:
+      FunctionName: !Sub "RecoverOps-IncidentsApi-${Environment}"
+      CodeUri: ../backend
+      Handler: src/handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          INCIDENTS_TABLE_NAME: !Ref IncidentsTable
+      Events:
+        # Health check
+        HealthCheck:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref IncidentsHttpApi
+            Path: /health
+            Method: GET
+        # Incidents List & Create
+        ListIncidents:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref IncidentsHttpApi
+            Path: /incidents
+            Method: GET
+        CreateIncident:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref IncidentsHttpApi
+            Path: /incidents
+            Method: POST
+        # Single Incident Get, Update, Delete
+        GetIncident:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref IncidentsHttpApi
+            Path: /incidents/{id}
+            Method: GET
+        UpdateIncident:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref IncidentsHttpApi
+            Path: /incidents/{id}
+            Method: PUT
+        DeleteIncident:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref IncidentsHttpApi
+            Path: /incidents/{id}
+            Method: DELETE
+        # Timeline Event
+        AddTimelineEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref IncidentsHttpApi
+            Path: /incidents/{id}/timeline
+            Method: POST
+
+  ##############################################################################
+  # 6. S3 Bucket for Frontend Hosting (Private, Origin Access Control)
+  ##############################################################################
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "recoverops-frontend-${AWS::AccountId}-${Environment}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "RecoverOps-OAC-${Environment}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+  ##############################################################################
+  # 7. Amazon CloudFront Distribution (HTTPS Edge Delivery + SPA Routing)
+  ##############################################################################
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "RecoverOps Frontend Distribution (${Environment})"
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOAC.Id
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        # Single Page Application (SPA) Error Routing:
+        # Maps 403 and 404 to index.html with 200 OK for React Router / HTML5 PushState
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+
+Outputs:
+  ApiUrl:
+    Description: Public HTTP API Gateway Endpoint URL
+    Value: !Sub "https://${IncidentsHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUrl"
+
+  CloudFrontDomain:
+    Description: CloudFront Distribution Domain Name (Frontend HTTPS URL)
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudFrontDomain"
+
+  FrontendBucketName:
+    Description: S3 Bucket Name for Static Website Assets
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-FrontendBucket"
+
+  DynamoDBTableName:
+    Description: DynamoDB Table Name
+    Value: !Ref IncidentsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-DynamoDBTable"
+
+  LambdaArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt IncidentsApiFunction.Arn

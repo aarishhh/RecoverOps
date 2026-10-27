@@ -1,0 +1,19 @@
+{
+  "name": "recoverops-backend",
+  "version": "1.0.0",
+  "description": "Serverless Incident Management Lambda Backend",
+  "type": "module",
+  "main": "src/handler.js",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev:mock": "node src/local-dev-server.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.740.0",
+    "@aws-sdk/lib-dynamodb": "^3.740.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.5"
+  }
+}
